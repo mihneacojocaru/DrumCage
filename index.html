@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Drumkäfig Rendering</title>
+<style>
+:root { --bg:#ededed; --card:#fff; --text:#1d1d1f; --muted:#5d6670; --side:#dde4ec; --accent:#7b57ff; --link:#2d8cff; }
+* { box-sizing:border-box; }
+html, body { margin:0; height:100%; background:var(--bg); color:var(--text); font:13px/1.4 "Lucida Grande", Helvetica, sans-serif; overflow:hidden; }
+header { position:fixed; inset:0 0 auto 0; z-index:5; background:linear-gradient(#f4f4f4,#d0d0d0); border-bottom:1px solid #a9a9a9; padding:7px 12px; display:flex; flex-wrap:wrap; gap:6px 14px; align-items:center; }
+h1 { margin:0 8px 0 0; font-size:15px; }
+h1 a { color:var(--link); font-size:12px; font-weight:normal; margin-left:8px; }
+.grp { display:flex; align-items:center; gap:4px; }
+.grp > span { color:var(--muted); font-size:11px; margin-right:2px; }
+button { font:inherit; font-size:12px; border:1px solid #8a9bb0; border-radius:11px; padding:3px 11px; color:#1d1d1f; cursor:pointer;
+  background:linear-gradient(#ffffff,#e9e9e9 50%,#dcdcdc 51%,#f3f3f3); box-shadow:0 1px 1px #0002; }
+button.on { background:linear-gradient(#b9dcff,#6fb3ff 50%,#3c93f5 51%,#7fc1ff); color:#062a55; border-color:#3a78c2; }
+#view { position:fixed; inset:0; }
+#info { position:fixed; right:12px; bottom:12px; z-index:5; width:min(340px, calc(100% - 24px)); background:var(--card); border-radius:8px; box-shadow:0 2px 10px #0003; overflow:hidden; }
+#info h2 { margin:0; font-size:13px; padding:7px 10px; background:var(--side); border-bottom:1px solid #c3ccd6; }
+#info div { padding:8px 10px; white-space:pre-line; }
+#hover { position:fixed; left:12px; bottom:12px; z-index:5; background:#1d1d1fcc; color:#fff; padding:4px 9px; border-radius:6px; font-size:12px; pointer-events:none; display:none; }
+.dim { background:#ffffffe6; border:1px solid #2d8cff; color:#0a4ea8; border-radius:5px; padding:1px 6px; font-size:11px; white-space:nowrap; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<header>
+  <h1>Drumkäfig – Rendering<a href="https://www.youtube.com/watch?v=BWGNP6UPWjQ" target="_blank">Vorbild-Video</a></h1>
+  <div class="grp"><span>Ansicht</span><button data-cam="aud" class="on">Publikum</button><button data-cam="drum">Drummer</button><button data-cam="door">Tür</button><button data-cam="top">Draufsicht</button><button data-cam="pod">Podest</button></div>
+  <div class="grp"><span>Front</span><button data-pc="clear" class="on">klar</button><button data-pc="tint">getönt</button></div>
+  <div class="grp"><button id="door">Tür auf</button><button id="walls" class="on">Raumwände</button><button id="vent" class="on">Lüftung</button><button id="air">Luftstrom</button><button id="light" class="on">Licht innen</button><button id="drummer" class="on">Drummer</button><button id="xray">Röntgen</button><button id="dims">Maße</button></div>
+</header>
+<div id="view"></div>
+<div id="hover"></div>
+<div id="info"><h2 id="infoTitle">Klick auf ein Teil</h2><div id="infoText">Ziehen: drehen · Rechts/zwei Finger: verschieben · Scrollen: Zoom.
+Maße aus skizze.py, Set nach Foto vereinfacht.</div></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+
+const mm = v => v / 1000;
+const CAGE = { W: 2700, D: 2000, H: 2400, side: 950, back_t: 140, roof_t: 18, overhang: 30, rail_h: 40, rail_w: 80, groove: 20, post: 40 };
+const PC_T = 6, SEGS = 3;
+const DOOR = { zarge: 45, h: 2000, t: 64, gap: 4, win_w: 400, win_h: 600, win_z: 1000 };
+const POD = { n: 3, w: 1000, d: 2000, h: 200, deck: 80 };
+const WALL_GAP = 100, DOOR_GAP = 800, PLANK = 18;
+
+const sag = CAGE.D - CAGE.side;
+const R = ((CAGE.W / 2) ** 2 + sag ** 2) / (2 * sag);
+const CY = CAGE.D - R;
+const HALF = Math.atan2(CAGE.W / 2, CAGE.side - CY);
+const PH = CAGE.H - CAGE.roof_t - 2 * CAGE.rail_h + 2 * CAGE.groove - 4;
+const POST_L = CAGE.H - CAGE.roof_t - 2 * CAGE.rail_h;
+const OPENING = CAGE.side - CAGE.post - CAGE.back_t;
+const LEAF = OPENING - 2 * DOOR.zarge - 2 * DOOR.gap;
+const TOP = POD.h + CAGE.H;
+// plan (x from left seen by audience, y from back wall) -> three (X right, Z toward audience)
+const X = x => mm(x - CAGE.W / 2), Z = y => mm(y - CAGE.D / 2), Y = z => mm(z);
+const arcPt = (phi, r = R) => [CAGE.W / 2 + r * Math.sin(phi), CY + r * Math.cos(phi)];
+
+const INFO = {
+  podest: ['Podest: 3 × Bütec 2×1 m', '300 × 200 cm, mit Klammern verbunden\nHöhe ≈ 20 cm inkl. Rollen\nKäfig mittig, 15 cm Rand links/rechts, hinten bündig\nTraglast 750 kg/m², Belastung ≈ 85 kg/m²'],
+  caster: ['Lenkrolle Ø100 mit Bremse', '12 Stück (4 je Element), je ≥ 100 kg\nRollenadapter statt Bütec-Füße, beim Händler klären'],
+  pc: ['Front: Polycarbonat 6 mm klar', `Kalt gebogen auf R ${R.toFixed(0)} mm (min. ≈ 900)\n3 Segmente ${(2 * R * HALF / SEGS - 4).toFixed(0)} × ${PH} mm aus Platten 2050 × 3050\nIn Nut 7×20 der Bogenschienen, Stöße auf Alu-Pfosten\nSeite links: gerade Scheibe ${CAGE.side - CAGE.back_t - 4} × ${PH}`],
+  post: ['Alu-Pfosten 40×40×3', `Länge ${POST_L} mm, 6 Stück\nPC-Stoß außen mit Klemmleiste 40×4 + EPDM\nM5 alle 300 mm, Bohrung im PC Ø8 (Dehnung)`],
+  rail: ['Bogenschienen Multiplex 2×20 mm', `CNC gefräst, 80 mm breit, Nut 7×20\nBogen ${(2 * R * HALF).toFixed(0)} mm, oben und unten\nmit Senkkopfschrauben ins Bütec-Deck`],
+  back: ['Rückwand absorbierend', 'KVH 45×70 Rahmen, außen 18 mm OSB\nFelder Steinwolle 70 mm, innen 50 mm Absorber + Akustikstoff\n2 Zuluft-Lüfter 140 mm unten, Kabel 150×80\nAbstand zur Raumwand ≥ 10 cm'],
+  roof: ['Dach Multiplex 18 mm', '3 Platten 920 × 2030, Stöße auf KVH-Balken\n3 cm Überstand an Front und Seiten\nunten 50 mm Absorber + Stoff, LED-Strip am Rand\n2 Abluft-Lüfter 140 mm hinten'],
+  door: ['Tür (Ecke bei der Floor Tom, zur Raum-Rückwand)', `Türblatt ${LEAF} × ${DOOR.h - 8} mm, 2 × 12 mm Multiplex + 40 mm Steinwolle\nFenster 400 × 600 doppelt PC\nlichte Breite ≈ ${OPENING - 2 * DOOR.zarge - DOOR.t} mm, öffnet nach außen\n3 Bänder an der Rückwandseite, EPDM umlaufend`],
+  frame: ['Türzarge + Sturz', 'KVH 45×70, darüber Absorber bis zum Dach'],
+  fan: ['Abluft: 2 PC-Lüfter 140 mm im Dach', 'z.B. Noctua NF-A14, je ≈ 25 €\nzusammen ≈ 120 m³/h, also ca. 12× frische Luft pro Stunde\nan Drehregler mit 12-V-Netzteil'],
+  intake: ['Zuluft: 2 PC-Lüfter 140 mm in der Rückwand', 'unten, saugen kühle Luft aus dem Spalt zur Raumwand\nwarme Luft geht oben durchs Dach raus'],
+  led: ['LED-Strip warmweiß', 'unter dem Dachrand innen, 5 m + Netzteil'],
+  kit: ['Drumset (vereinfacht, Rechtshänder)', 'Kick 22", Snare 14", Tom 12", Floor Tom 16"\nHi-Hat 14", Crash 18", Ride 20"\nBlick in den Bogen zur Bühnenmitte\nFloor Tom und Ride auf der Türseite'],
+  drummer: ['Drummer', 'Rücken zur Käfig-Rückwand (rechte Raumwand)\nTür rechts von ihm, direkt hinter der Floor Tom'],
+  room: ['Raum', 'Käfig in der Ecke: Rückwand 10 cm vor der rechten Raumwand\n80 cm Gang zur Raum-Rückwand für die Tür\nPublikum vorn, Bühnenmitte links'],
+};
+
+const host = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+host.appendChild(renderer.domElement);
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.domElement.style.cssText = 'position:fixed;inset:0;pointer-events:none';
+host.appendChild(labelRenderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#e4e7ec');
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const camera = new THREE.PerspectiveCamera(42, 1, 0.05, 40);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+scene.add(new THREE.HemisphereLight('#ffffff', '#9aa3b0', 0.5));
+const sun = new THREE.DirectionalLight('#ffffff', 1.4);
+sun.position.set(-3, 6, 5);
+sun.castShadow = true;
+sun.shadow.mapSize.set(4096, 4096);
+Object.assign(sun.shadow.camera, { left: -4, right: 4, top: 4, bottom: -2, near: 0.5, far: 20 });
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.02;
+scene.add(sun);
+
+function woodTexture(base, line, n) {
+  const c = document.createElement('canvas');
+  c.width = 512; c.height = 1024;
+  const g = c.getContext('2d');
+  g.fillStyle = base; g.fillRect(0, 0, 512, 1024);
+  for (let i = 0; i < n; i++) {
+    g.strokeStyle = line; g.globalAlpha = 0.08 + Math.random() * 0.2; g.lineWidth = 1 + Math.random() * 3;
+    const x = Math.random() * 512, a = 4 + Math.random() * 14, f = 0.002 + Math.random() * 0.006;
+    g.beginPath();
+    for (let y = 0; y <= 1024; y += 8) g.lineTo(x + Math.sin(y * f + i) * a, y);
+    g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+const M = {
+  birch: new THREE.MeshStandardMaterial({ map: woodTexture('#e3cfa5', '#b8955e', 140), roughness: 0.6 }),
+  osb: new THREE.MeshStandardMaterial({ color: '#c9a46a', roughness: 0.9 }),
+  fabric: new THREE.MeshStandardMaterial({ color: '#26262c', roughness: 1 }),
+  alu: new THREE.MeshStandardMaterial({ color: '#c9cdd2', roughness: 0.3, metalness: 0.9 }),
+  aluDark: new THREE.MeshStandardMaterial({ color: '#3a3d42', roughness: 0.4, metalness: 0.7 }),
+  deck: new THREE.MeshStandardMaterial({ color: '#4a4f57', roughness: 0.95 }),
+  rubber: new THREE.MeshStandardMaterial({ color: '#1a1a1c', roughness: 0.85 }),
+  door: new THREE.MeshStandardMaterial({ map: woodTexture('#d9c08e', '#a07a48', 120), roughness: 0.6 }),
+  mdf: new THREE.MeshStandardMaterial({ color: '#7d756b', roughness: 0.9 }),
+  shell: new THREE.MeshStandardMaterial({ color: '#7c2416', roughness: 0.25, metalness: 0.3 }),
+  head: new THREE.MeshStandardMaterial({ color: '#efece4', roughness: 0.6 }),
+  chrome: new THREE.MeshStandardMaterial({ color: '#dfe3e8', roughness: 0.25, metalness: 0.75 }),
+  bronze: new THREE.MeshStandardMaterial({ color: '#d4a24c', roughness: 0.4, metalness: 0.3, emissive: '#5a3e14', emissiveIntensity: 0.6 }),
+  person: new THREE.MeshStandardMaterial({ color: '#2b2f38', roughness: 0.8 }),
+  skin: new THREE.MeshStandardMaterial({ color: '#c99a7c', roughness: 0.7 }),
+  led: new THREE.MeshStandardMaterial({ color: '#ffd9a0', emissive: '#ffb24a', emissiveIntensity: 2 }),
+  air: new THREE.MeshBasicMaterial({ color: '#00e0ba' }),
+  floor: new THREE.MeshStandardMaterial({ color: '#5d6670', roughness: 0.9 }),
+  wall: new THREE.MeshStandardMaterial({ color: '#c9d2df', roughness: 0.95 }),
+};
+const PCM = new THREE.MeshPhysicalMaterial({ color: '#e6f6ff', roughness: 0.04, metalness: 0, transparent: true, opacity: 0.16, clearcoat: 1, side: THREE.DoubleSide, depthWrite: false });
+for (const m of Object.values(M)) m.side = THREE.DoubleSide;
+
+const pickables = [];
+function tag(obj, key) {
+  obj.traverse(o => { if (o.isMesh) { o.userData.info = key; pickables.push(o); } });
+  return obj;
+}
+function mesh(geo, mat, shadow = true) { const m = new THREE.Mesh(geo, mat); m.castShadow = m.receiveShadow = shadow; return m; }
+function box(w, h, d, mat) { return mesh(new THREE.BoxGeometry(mm(w), mm(h), mm(d)), mat); }
+function at(o, x, z, y) { o.position.set(X(x), Y(z), Z(y)); return o; }
+function cyl(r, h, mat, seg = 40) { return mesh(new THREE.CylinderGeometry(mm(r), mm(r), mm(h), seg), mat); }
+function rod(a, b, r, mat) {
+  const va = new THREE.Vector3(...a), vb = new THREE.Vector3(...b);
+  const m = mesh(new THREE.CylinderGeometry(r, r, va.distanceTo(vb), 10), mat);
+  m.position.copy(va).add(vb).multiplyScalar(0.5);
+  m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), vb.clone().sub(va).normalize());
+  return m;
+}
+function flatShape(pts, holes = []) {
+  const s = new THREE.Shape(pts.map(([x, y]) => new THREE.Vector2(X(x), -Z(y))));
+  for (const h of holes) s.holes.push(new THREE.Path(h.map(([x, y]) => new THREE.Vector2(X(x), -Z(y)))));
+  return s;
+}
+function slab(shape, z, h, mat) {
+  const g = new THREE.ExtrudeGeometry(shape, { depth: mm(h), bevelEnabled: false, curveSegments: 48 });
+  g.rotateX(-Math.PI / 2);
+  const m = mesh(g, mat); m.position.y = Y(z); return m;
+}
+const arcPoly = (r = R, n = 64) => Array.from({ length: n + 1 }, (_, i) => arcPt(HALF - i * 2 * HALF / n, r));
+
+// room
+const room = new THREE.Group();
+const floor = mesh(new THREE.PlaneGeometry(14, 12), M.floor); floor.rotation.x = -Math.PI / 2; floor.position.z = 2; room.add(floor);
+const backWallRoom = mesh(new THREE.PlaneGeometry(12, 4.2), M.wall); backWallRoom.position.set(-4.9, 2.1, X(-DOOR_GAP)); room.add(backWallRoom);
+const sideWallRoom = mesh(new THREE.PlaneGeometry(12, 4.2), M.wall); sideWallRoom.rotation.y = -Math.PI / 2; sideWallRoom.position.set(-Z(-WALL_GAP), 2.1, 3.85); room.add(sideWallRoom);
+scene.add(tag(room, 'room'));
+
+// cage in its own coordinates, turned so its back stands at the right room wall and the arc faces stage centre
+const world = new THREE.Group();
+world.rotation.y = -Math.PI / 2;
+scene.add(world);
+
+// podest
+const podest = new THREE.Group(), casters = new THREE.Group();
+for (let i = 0; i < POD.n; i++) {
+  const x0 = -150 + i * POD.w;
+  // deck sits 2 mm below the alu frame and no frame pieces overlap, otherwise the coplanar faces flicker
+  podest.add(at(box(POD.w - 62, POD.deck - 12, POD.d - 62, M.deck), x0 + POD.w / 2, POD.h - 2 - (POD.deck - 12) / 2, POD.d / 2));
+  for (const [w, d, dx, dy] of [[POD.w - 2, 30, 0, -POD.d / 2 + 16], [POD.w - 2, 30, 0, POD.d / 2 - 16], [30, POD.d - 64, -POD.w / 2 + 16, 0], [30, POD.d - 64, POD.w / 2 - 16, 0]])
+    podest.add(at(box(w, POD.deck, d, M.alu), x0 + POD.w / 2 + dx, POD.h - POD.deck / 2, POD.d / 2 + dy));
+  for (const cx of [x0 + 90, x0 + POD.w - 90]) for (const cy of [90, POD.d - 90]) {
+    const plate = at(box(70, 6, 70, M.aluDark), cx, POD.h - POD.deck - 3, cy);
+    const fork = at(box(50, 50, 30, M.aluDark), cx, 85, cy);
+    const wheel = at(cyl(50, 32, M.rubber, 24), cx, 50, cy); wheel.rotation.z = Math.PI / 2;
+    const stem = at(cyl(8, POD.h - POD.deck - 100, M.chrome, 12), cx, 100 + (POD.h - POD.deck - 100) / 2, cy);
+    casters.add(plate, fork, wheel, stem);
+  }
+}
+world.add(tag(podest, 'podest'), tag(casters, 'caster'));
+
+// rails
+const railOuter = [[CAGE.W, CAGE.back_t], [CAGE.W, CAGE.side], ...arcPoly(), [0, CAGE.side], [0, CAGE.back_t]];
+const railInner = [[CAGE.rail_w, CAGE.back_t], [CAGE.rail_w, CAGE.side], ...arcPoly(R - CAGE.rail_w).reverse(), [CAGE.W - CAGE.rail_w, CAGE.side], [CAGE.W - CAGE.rail_w, CAGE.back_t]];
+const railShape = flatShape([...railOuter, ...railInner]);
+const rails = new THREE.Group();
+rails.add(slab(railShape, POD.h, CAGE.rail_h, M.birch), slab(railShape, TOP - CAGE.roof_t - CAGE.rail_h, CAGE.rail_h, M.birch));
+world.add(tag(rails, 'rail'));
+
+// polycarbonate
+const pc = new THREE.Group();
+const pcY = POD.h + CAGE.rail_h - CAGE.groove + PH / 2;
+for (let i = 0; i < SEGS; i++) {
+  const g = new THREE.CylinderGeometry(mm(R), mm(R), mm(PH), 64, 1, true, -HALF + i * 2 * HALF / SEGS + 0.0015, 2 * HALF / SEGS - 0.003);
+  const m = mesh(g, PCM, false); m.position.set(0, Y(pcY), Z(CY)); pc.add(m);
+}
+const sidePc = mesh(new THREE.PlaneGeometry(mm(CAGE.side - CAGE.back_t), mm(PH)), PCM, false);
+sidePc.rotation.y = Math.PI / 2; at(sidePc, CAGE.W - PC_T / 2, pcY, (CAGE.side + CAGE.back_t) / 2); pc.add(sidePc);
+world.add(tag(pc, 'pc'));
+
+// posts
+const posts = new THREE.Group();
+const postY = POD.h + CAGE.rail_h + POST_L / 2;
+const joints = Array.from({ length: SEGS + 1 }, (_, i) => -HALF + i * 2 * HALF / SEGS);
+for (const phi of joints) {
+  const [x, y] = arcPt(phi, R - PC_T - CAGE.post / 2);
+  const p = at(box(CAGE.post, POST_L, CAGE.post, M.alu), x, postY, y); p.rotation.y = phi; posts.add(p);
+  const [cx, cy] = arcPt(phi, R + 2);
+  const c = at(box(40, PH, 4, M.alu), cx, pcY, cy); c.rotation.y = phi; posts.add(c);
+}
+for (const x of [PC_T + CAGE.post / 2, CAGE.W - PC_T - CAGE.post / 2]) {
+  posts.add(at(box(CAGE.post, POST_L, CAGE.post, M.alu), x, postY, CAGE.side - CAGE.post / 2));
+  posts.add(at(box(CAGE.post, POST_L, CAGE.post, M.alu), x, postY, CAGE.back_t + CAGE.post / 2));
+}
+world.add(tag(posts, 'post'));
+
+// back wall + roof (x-ray capable)
+const opaque = [M.osb, M.fabric, M.birch, M.door];
+const back = new THREE.Group();
+const wallH = CAGE.H - CAGE.roof_t;
+back.add(at(box(CAGE.W, wallH, PLANK, M.osb), CAGE.W / 2, POD.h + wallH / 2, 9));
+back.add(at(box(CAGE.W, wallH, 70, M.mdf), CAGE.W / 2, POD.h + wallH / 2, 18 + 35));
+back.add(at(box(CAGE.W - 10, wallH - 10, 50, M.fabric), CAGE.W / 2, POD.h + wallH / 2, CAGE.back_t - 25));
+world.add(tag(back, 'back'));
+
+const roof = new THREE.Group();
+const ov = CAGE.overhang;
+const roofShape = flatShape([[-ov, 0], [CAGE.W + ov, 0], [CAGE.W + ov, CAGE.side], ...arcPoly(R + ov), [-ov, CAGE.side]]);
+roof.add(slab(roofShape, TOP - CAGE.roof_t, CAGE.roof_t, M.birch));
+const innerShape = flatShape([[CAGE.rail_w, CAGE.back_t], [CAGE.W - CAGE.rail_w, CAGE.back_t], [CAGE.W - CAGE.rail_w, CAGE.side], ...arcPoly(R - CAGE.rail_w), [CAGE.rail_w, CAGE.side]]);
+roof.add(slab(innerShape, TOP - CAGE.roof_t - 50, 50, M.fabric));
+world.add(tag(roof, 'roof'));
+
+// LED strip + warm light
+const ledPts = arcPoly(R - CAGE.rail_w - 20, 40).map(([x, y]) => new THREE.Vector3(X(x), Y(TOP - CAGE.roof_t - 60), Z(y)));
+const led = mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(ledPts), 80, 0.008, 6), M.led, false);
+world.add(tag(led, 'led'));
+const warm = [new THREE.PointLight('#ffb466', 3, 4, 1.6), new THREE.PointLight('#ffb466', 2, 4, 1.6)];
+warm[0].position.set(X(900), Y(TOP - 200), Z(1300)); warm[1].position.set(X(1800), Y(TOP - 200), Z(1300));
+world.add(...warm);
+
+// door corner (right side, Floor-Tom side)
+const frame = new THREE.Group();
+const y0 = CAGE.back_t, zx = 35;
+frame.add(at(box(70, DOOR.h + 45, DOOR.zarge, M.birch), zx, POD.h + CAGE.rail_h + (DOOR.h + 45) / 2, y0 + DOOR.zarge / 2));
+frame.add(at(box(70, DOOR.h + 45, DOOR.zarge, M.birch), zx, POD.h + CAGE.rail_h + (DOOR.h + 45) / 2, y0 + OPENING - DOOR.zarge / 2));
+frame.add(at(box(70, 45, OPENING, M.birch), zx, POD.h + CAGE.rail_h + DOOR.h + 22, y0 + OPENING / 2));
+const transomH = TOP - CAGE.roof_t - CAGE.rail_h - (POD.h + CAGE.rail_h + DOOR.h + 45);
+frame.add(at(box(70, transomH, OPENING, M.fabric), zx, POD.h + CAGE.rail_h + DOOR.h + 45 + transomH / 2, y0 + OPENING / 2));
+world.add(tag(frame, 'frame'));
+
+const doorPivot = new THREE.Group();
+const hingeY = y0 + DOOR.zarge + DOOR.gap;
+doorPivot.position.set(X(0), 0, Z(hingeY));
+const leafZ = POD.h + CAGE.rail_h + 4 + (DOOR.h - 8) / 2;
+const leaf = box(DOOR.t, DOOR.h - 8, LEAF, M.door); leaf.position.set(mm(DOOR.t / 2), Y(leafZ), mm(LEAF / 2));
+const win = mesh(new THREE.BoxGeometry(mm(DOOR.t + 4), mm(DOOR.win_h), mm(DOOR.win_w)), new THREE.MeshPhysicalMaterial({ color: '#9fd3ff', roughness: 0.05, transparent: true, opacity: 0.55 }));
+win.position.set(mm(DOOR.t / 2), Y(POD.h + DOOR.win_z + DOOR.win_h / 2), mm(LEAF / 2));
+const handle = box(30, 160, 25, M.chrome); handle.position.set(-mm(18), Y(POD.h + 1130), mm(LEAF - 80));
+const handleIn = handle.clone(); handleIn.position.x = mm(DOOR.t + 18);
+doorPivot.add(leaf, win, handle, handleIn);
+for (const hz of [300, 1100, 1850]) { const h = box(14, 100, 20, M.aluDark); h.position.set(0, Y(POD.h + CAGE.rail_h + hz), 0); doorPivot.add(h); }
+world.add(tag(doorPivot, 'door'));
+
+// ventilation: 140 mm PC fans, intake low in the back wall, exhaust in the roof
+function pcFan() {
+  const g = new THREE.Group();
+  const frame = new THREE.Shape([[-70, -70], [70, -70], [70, 70], [-70, 70]].map(([x, y]) => new THREE.Vector2(mm(x), mm(y))));
+  frame.holes.push(new THREE.Path().absarc(0, 0, mm(66), 0, Math.PI * 2, true));
+  const fg = new THREE.ExtrudeGeometry(frame, { depth: mm(25), bevelEnabled: false, curveSegments: 32 }); fg.translate(0, 0, -mm(12.5));
+  g.add(mesh(fg, M.rubber));
+  const hub = cyl(20, 24, M.aluDark, 24); hub.rotation.x = Math.PI / 2; g.add(hub);
+  for (let i = 0; i < 7; i++) { const bl = box(46, 2, 18, M.rubber); bl.position.set(mm(40 * Math.cos(i * 0.9)), mm(40 * Math.sin(i * 0.9)), 0); bl.rotation.set(0.5, 0, i * 0.9); g.add(bl); }
+  const grill = mesh(new THREE.TorusGeometry(mm(62), mm(2), 6, 40), M.chrome); grill.position.z = mm(14); g.add(grill);
+  return g;
+}
+const vent = new THREE.Group();
+for (const x of [1900, 2300]) { const f = pcFan(); f.position.set(X(x), Y(POD.h + 150 + 70), Z(CAGE.back_t - 12)); vent.add(f); }
+world.add(tag(vent, 'intake'));
+const fan = new THREE.Group();
+for (const [x, y] of [[700, 400], [2000, 400]]) { const f = pcFan(); f.rotation.x = Math.PI / 2; f.position.set(X(x), Y(TOP - CAGE.roof_t - 50 - 12), Z(y)); fan.add(f); }
+world.add(tag(fan, 'fan'));
+
+const airCurve = new THREE.CatmullRomCurve3([
+  [2100, 350, -WALL_GAP + 20], [2100, 350, 60], [2100, 380, 300], [1700, 700, 900], [1350, 1300, 1300], [900, 1900, 900],
+  [700, TOP - 250, 450], [700, TOP - 30, 400], [700, TOP + 120, 400], [700, TOP + 400, 400],
+].map(([x, z, y]) => new THREE.Vector3(X(x), Y(z), Z(y))));
+const air = new THREE.Group(); air.visible = false;
+const dots = Array.from({ length: 70 }, (_, i) => { const d = mesh(new THREE.SphereGeometry(0.018, 10, 8), M.air, false); d.userData.t = i / 70; air.add(d); return d; });
+world.add(air);
+
+// drum kit in drummer coordinates: u forward, v to the drummer's right, h above podest
+const THRONE = [1400, 700];
+const P = (u, v, h) => [mm(-v), Y(POD.h + h), mm(u)];
+function placeAtThrone(g) { g.position.set(X(THRONE[0]), 0, Z(THRONE[1])); return g; }
+const kit = new THREE.Group();
+function drum(u, v, h, diam, depth, tiltX = 0, tiltZ = 0) {
+  const g = new THREE.Group();
+  g.add(cyl(diam / 2, depth, M.shell));
+  for (const s of [1, -1]) {
+    const hd = cyl(diam / 2 + 1, 2, M.head); hd.position.y = mm(s * depth / 2); g.add(hd);
+    const hoop = mesh(new THREE.TorusGeometry(mm(diam / 2 + 4), mm(5), 8, 48), M.chrome); hoop.rotation.x = Math.PI / 2; hoop.position.y = mm(s * (depth / 2 - 4)); g.add(hoop);
+  }
+  g.rotation.set(tiltX, 0, tiltZ);
+  g.position.set(...P(u, v, h));
+  kit.add(g);
+  return g;
+}
+function tripod(u, v, r) {
+  for (let i = 0; i < 3; i++) {
+    const a = i * Math.PI * 2 / 3 + 0.4;
+    kit.add(rod(P(u, v, 380), P(u + r * Math.cos(a), v + r * Math.sin(a), 4), 0.008, M.chrome));
+  }
+}
+function cymbal(u, v, h, diam, tilt = 0.12, standFrom = null, stand = true) {
+  const prof = [[0, 18], [diam * 0.08, 16], [diam * 0.12, 8], [diam * 0.5, 0], [diam * 0.5, -1.5], [diam * 0.12, 6.5], [diam * 0.08, 14.5], [0, 16.5]];
+  const c = mesh(new THREE.LatheGeometry(prof.map(([r, y]) => new THREE.Vector2(mm(r), mm(y))), 64), M.bronze);
+  c.position.set(...P(u, v, h)); c.rotation.x = tilt;
+  kit.add(c);
+  if (!stand) return;
+  const [su, sv] = standFrom || [u, v];
+  const poleTop = standFrom ? h - 160 : h;
+  kit.add(rod(P(su, sv, 0), P(su, sv, poleTop), 0.011, M.chrome));
+  if (standFrom) kit.add(rod(P(su, sv, poleTop), P(u, v, h - 8), 0.008, M.chrome));
+  tripod(su, sv, 300);
+}
+drum(648, 0, 280, 559, 457, Math.PI / 2);
+const kmark = cyl(140, 3, M.rubber); kmark.rotation.x = Math.PI / 2; kmark.position.set(...P(648 + 230, 0, 280)); kit.add(kmark);
+drum(380, -170, 660, 356, 140, -0.12, 0.05); tripod(380, -170, 220);
+kit.add(rod(P(380, -170, 580), P(380, -170, 380), 0.011, M.chrome));
+drum(620, 70, 830, 305, 250, -0.45, -0.1);
+kit.add(rod(P(650, 40, 560), P(620, 70, 760), 0.011, M.chrome));
+drum(260, 530, 430, 406, 406);
+for (const [du, dv] of [[180, -100], [-120, -150], [60, 190]]) kit.add(rod(P(260 + du, 530 + dv, 500), P(260 + du * 1.15, 530 + dv * 1.15, 0), 0.007, M.chrome));
+cymbal(380, -500, 980, 356, 0.02);
+cymbal(380, -500, 960, 356, -0.02, null, false);
+kit.add(rod(P(380, -500, 980), P(380, -500, 1010), 0.005, M.chrome));
+cymbal(720, -530, 1550, 457, -0.25, [620, -640]);
+cymbal(690, 640, 1350, 508, -0.2, [600, 760]);
+const SEAT_U = -150;
+const seat = cyl(190, 90, M.person); seat.position.set(...P(SEAT_U, 0, 540)); kit.add(seat);
+kit.add(rod(P(SEAT_U, 0, 495), P(SEAT_U, 0, 300), 0.014, M.chrome)); tripod(SEAT_U, 0, 250);
+world.add(tag(placeAtThrone(kit), 'kit'));
+
+const person = new THREE.Group();
+const torso = mesh(new THREE.CapsuleGeometry(0.17, 0.42, 6, 16), M.person); torso.position.set(...P(SEAT_U - 10, 0, 930)); torso.rotation.x = 0.12;
+const headM = mesh(new THREE.SphereGeometry(0.105, 20, 16), M.skin); headM.position.set(...P(SEAT_U + 40, 0, 1370));
+person.add(torso, headM);
+// right foot on the kick pedal, left foot on the hi-hat pedal
+for (const [s, knee, foot] of [[1, [260, 150, 560], [400, 50, 80]], [-1, [240, -240, 560], [370, -420, 80]]]) {
+  person.add(rod(P(SEAT_U + 30, s * 110, 590), P(...knee), 0.07, M.person));
+  person.add(rod(P(...knee), P(...foot), 0.055, M.person));
+  person.add(rod(P(SEAT_U + 10, s * 190, 1160), P(SEAT_U + 200, s * 230, 880), 0.045, M.person));
+  person.add(rod(P(SEAT_U + 200, s * 230, 880), P(SEAT_U + 400, s * 210, 760), 0.04, M.skin));
+}
+placeAtThrone(person);
+world.add(tag(person, 'drummer'));
+
+// dimensions
+const dimLabels = [], dimLines = new THREE.Group(); dimLines.visible = false;
+const lineMat = new THREE.LineBasicMaterial({ color: '#2d8cff' });
+function dim(a, b, text) {
+  const pa = new THREE.Vector3(X(a[0]), Y(a[1]), Z(a[2])), pb = new THREE.Vector3(X(b[0]), Y(b[1]), Z(b[2]));
+  dimLines.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([pa, pb]), lineMat));
+  const el = document.createElement('div'); el.className = 'dim'; el.textContent = text;
+  const l = new CSS2DObject(el); l.position.copy(pa).add(pb).multiplyScalar(0.5); l.visible = false; world.add(l); dimLabels.push(l);
+}
+dim([0, TOP + 120, CAGE.D + 60], [CAGE.W, TOP + 120, CAGE.D + 60], `Käfig ${CAGE.W}`);
+dim([-150, 60, CAGE.D + 200], [2850, 60, CAGE.D + 200], 'Podest 3 × Bütec 2×1 m = 3000 × 2000');
+dim([-DOOR_GAP, 30, 1500], [-150, 30, 1500], `Gang ${DOOR_GAP - 150} (zur Raum-Rückwand)`);
+dim([CAGE.W + 200, TOP + 60, 0], [CAGE.W + 200, TOP + 60, CAGE.D], `Tiefe ${CAGE.D}`);
+dim([CAGE.W + 260, POD.h, CAGE.side], [CAGE.W + 260, TOP, CAGE.side], `Käfig ${CAGE.H}`);
+dim([CAGE.W + 260, 0, CAGE.side + 300], [CAGE.W + 260, TOP, CAGE.side + 300], `gesamt ${TOP}`);
+dim([-90, POD.h + CAGE.rail_h, hingeY], [-90, POD.h + CAGE.rail_h, hingeY + LEAF], `Tür ${LEAF} × ${DOOR.h}`);
+dim([CAGE.W + 120, 0, 0], [CAGE.W + 120, 0, CAGE.side], `gerade ${CAGE.side}`);
+world.add(dimLines);
+
+// UI
+let xray = false, doorOpen = false;
+function applyXray() {
+  for (const m of opaque) { m.transparent = xray; m.opacity = xray ? 0.18 : 1; m.depthWrite = !xray; m.needsUpdate = true; }
+}
+const $ = s => document.querySelectorAll(s);
+const radio = (sel, attr, fn) => $(sel).forEach(b => b.addEventListener('click', () => { $(sel).forEach(x => x.classList.toggle('on', x === b)); fn(b.dataset[attr]); }));
+const CAMS = {
+  aud: [[-1.4, 2.0, 5.8], [0, 1.25, 0]],
+  drum: [[0.8, 2.3, 0.05], [-1.0, 0.6, 0.0]],
+  door: [[-3.2, 3.0, -1.95], [0.3, 1.0, -1.1]],
+  top: [[0.05, 7.2, 0.3], [0.05, 0, 0]],
+  pod: [[-2.8, 0.55, 3.0], [-0.3, 0.25, 0.3]],
+};
+let camGoal = null;
+radio('[data-cam]', 'cam', k => { const [p, t] = CAMS[k]; camGoal = { p: new THREE.Vector3(...p), t: new THREE.Vector3(...t) }; });
+camera.position.set(...CAMS.aud[0]); controls.target.set(...CAMS.aud[1]);
+radio('[data-pc]', 'pc', k => {
+  PCM.color.set(k === 'tint' ? '#3c4a58' : '#e6f6ff'); PCM.opacity = k === 'tint' ? 0.42 : 0.16; PCM.needsUpdate = true;
+});
+const toggle = (id, fn) => { const b = document.getElementById(id); b.addEventListener('click', () => { b.classList.toggle('on'); fn(b.classList.contains('on')); }); };
+toggle('door', on => { doorOpen = on; });
+toggle('walls', on => { backWallRoom.visible = on; sideWallRoom.visible = on; });
+toggle('vent', on => { vent.visible = on; fan.visible = on; });
+toggle('air', on => { air.visible = on; });
+toggle('light', on => { warm.forEach(l => { l.visible = on; }); M.led.emissiveIntensity = on ? 2 : 0; });
+toggle('drummer', on => { person.visible = on; });
+toggle('xray', on => { xray = on; applyXray(); });
+toggle('dims', on => { dimLabels.forEach(l => { l.visible = on; }); dimLines.visible = on; });
+
+const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+const hoverEl = document.getElementById('hover');
+const seeThrough = new Set(['pc', 'back', 'roof', 'frame', 'room']);
+function pick(e) {
+  const r = renderer.domElement.getBoundingClientRect();
+  ptr.set((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1);
+  ray.setFromCamera(ptr, camera);
+  const hits = ray.intersectObjects(pickables.filter(o => o.visible && o.parent.visible), false);
+  const first = hits[0] && hits[0].object.userData.info;
+  if (first === 'pc' || (xray && seeThrough.has(first))) {
+    const behind = hits.find(h => !seeThrough.has(h.object.userData.info));
+    if (behind && behind.distance - hits[0].distance < 3) return behind.object.userData.info;
+  }
+  return first;
+}
+renderer.domElement.addEventListener('pointermove', e => {
+  const k = pick(e);
+  hoverEl.style.display = k ? 'block' : 'none';
+  if (k) hoverEl.textContent = INFO[k][0];
+});
+let down = null;
+renderer.domElement.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4) return;
+  const k = pick(e);
+  if (!k) return;
+  document.getElementById('infoTitle').textContent = INFO[k][0];
+  document.getElementById('infoText').innerHTML = INFO[k][1];
+});
+
+function resize() {
+  const w = innerWidth, h = innerHeight;
+  renderer.setSize(w, h); labelRenderer.setSize(w, h);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = clock.getDelta();
+  if (camGoal) {
+    camera.position.lerp(camGoal.p, 0.08); controls.target.lerp(camGoal.t, 0.08);
+    if (camera.position.distanceTo(camGoal.p) < 0.005) camGoal = null;
+  }
+  doorPivot.rotation.y += ((doorOpen ? -1.75 : 0) - doorPivot.rotation.y) * 0.08;
+  if (air.visible) for (const d of dots) { d.userData.t = (d.userData.t + dt * 0.06) % 1; d.position.copy(airCurve.getPointAt(d.userData.t)); }
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
