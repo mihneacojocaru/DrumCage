@@ -32,7 +32,7 @@ button.on { background:linear-gradient(#b9dcff,#6fb3ff 50%,#3c93f5 51%,#7fc1ff);
 </head>
 <body>
 <header>
-  <h1>Drumkäfig – Rendering<a href="https://www.youtube.com/watch?v=BWGNP6UPWjQ" target="_blank">Vorbild-Video</a></h1>
+  <h1>Drumkäfig – Rendering<a id="video" href="https://www.youtube.com/watch?v=BWGNP6UPWjQ" target="_blank" hidden>Vorbild-Video</a></h1>
   <div class="grp"><span>Ansicht</span><button data-cam="aud" class="on">Publikum</button><button data-cam="drum">Drummer</button><button data-cam="door">Tür</button><button data-cam="top">Draufsicht</button><button data-cam="pod">Podest</button></div>
   <div class="grp"><span>Front</span><button data-pc="clear" class="on">klar</button><button data-pc="tint">getönt</button></div>
   <div class="grp"><button id="door">Tür auf</button><button id="walls" class="on">Raumwände</button><button id="vent" class="on">Lüftung</button><button id="air">Luftstrom</button><button id="light" class="on">Licht innen</button><button id="drummer" class="on">Drummer</button><button id="xray">Röntgen</button><button id="dims">Maße</button></div>
@@ -441,6 +441,9 @@ toggle('light', on => { warm.forEach(l => { l.visible = on; }); M.led.emissiveIn
 toggle('drummer', on => { person.visible = on; });
 toggle('xray', on => { xray = on; applyXray(); });
 toggle('dims', on => { dimLabels.forEach(l => { l.visible = on; }); dimLines.visible = on; });
+['door', 'walls', 'light', 'drummer'].forEach(id => document.getElementById(id).click());
+// Video link only appears with #vorbild in the URL.
+document.getElementById('video').hidden = location.hash !== '#vorbild';
 
 const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
 const hoverEl = document.getElementById('hover');
