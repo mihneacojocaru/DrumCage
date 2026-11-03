@@ -21,6 +21,20 @@ button.on { background:linear-gradient(#b9dcff,#6fb3ff 50%,#3c93f5 51%,#7fc1ff);
 #info h2 { margin:0; font-size:13px; padding:7px 10px; background:var(--side); border-bottom:1px solid #c3ccd6; }
 #info div { padding:8px 10px; white-space:pre-line; }
 #hover { position:fixed; left:12px; bottom:12px; z-index:5; background:#1d1d1fcc; color:#fff; padding:4px 9px; border-radius:6px; font-size:12px; pointer-events:none; display:none; }
+#info h2 { cursor:pointer; }
+#info.closed div { display:none; }
+#info h2::after { content:"▾"; float:right; color:var(--muted); }
+#info.closed h2::after { content:"▸"; }
+@media (hover:none) { #hover { display:none !important; } }
+@media (max-width:700px) {
+  header { flex-direction:column; align-items:stretch; gap:6px; padding:8px 0; }
+  h1 { padding:0 12px; }
+  .grp { overflow-x:auto; scrollbar-width:none; padding:0 12px; }
+  .grp::-webkit-scrollbar { display:none; }
+  button { flex:none; white-space:nowrap; font-size:13px; padding:5px 12px; }
+  #info { left:8px; right:8px; bottom:8px; width:auto; font-size:12px; }
+  #info div { max-height:28vh; overflow:auto; }
+}
 .dim { background:#ffffffe6; border:1px solid #2d8cff; color:#0a4ea8; border-radius:5px; padding:1px 6px; font-size:11px; white-space:nowrap; }
 </style>
 <script type="importmap">
@@ -94,7 +108,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 host.appendChild(renderer.domElement);
 const labelRenderer = new CSS2DRenderer();
-labelRenderer.domElement.style.cssText = 'position:fixed;inset:0;pointer-events:none';
+labelRenderer.domElement.style.cssText = 'position:absolute;inset:0;pointer-events:none';
 host.appendChild(labelRenderer.domElement);
 
 const scene = new THREE.Scene();
@@ -427,8 +441,14 @@ const CAMS = {
   pod: [[-2.8, 0.55, 3.0], [-0.3, 0.25, 0.3]],
 };
 let camGoal = null;
-radio('[data-cam]', 'cam', k => { const [p, t] = CAMS[k]; camGoal = { p: new THREE.Vector3(...p), t: new THREE.Vector3(...t) }; });
-camera.position.set(...CAMS.aud[0]); controls.target.set(...CAMS.aud[1]);
+// Presets are framed for landscape; narrow screens pull the camera back along its view line
+function camPose(k) {
+  const t = new THREE.Vector3(...CAMS[k][1]);
+  const fit = Math.max(1, 1.2 / (innerWidth / innerHeight)) ** 0.35;
+  return { p: new THREE.Vector3(...CAMS[k][0]).sub(t).multiplyScalar(fit).add(t), t };
+}
+radio('[data-cam]', 'cam', k => { camGoal = camPose(k); });
+{ const { p, t } = camPose('aud'); camera.position.copy(p); controls.target.copy(t); }
 radio('[data-pc]', 'pc', k => {
   PCM.color.set(k === 'tint' ? '#3c4a58' : '#e6f6ff'); PCM.opacity = k === 'tint' ? 0.42 : 0.16; PCM.needsUpdate = true;
 });
@@ -445,6 +465,12 @@ toggle('dims', on => { dimLabels.forEach(l => { l.visible = on; }); dimLines.vis
 // Video link only appears with #vorbild in the URL.
 document.getElementById('video').hidden = location.hash !== '#vorbild';
 
+const infoEl = document.getElementById('info');
+infoEl.querySelector('h2').addEventListener('click', () => infoEl.classList.toggle('closed'));
+if (matchMedia('(pointer: coarse)').matches) {
+  document.getElementById('infoTitle').textContent = 'Tipp auf ein Teil';
+  document.getElementById('infoText').textContent = 'Ein Finger: drehen · Zwei Finger: zoomen und verschieben.\nMaße aus skizze.py, Set nach Foto vereinfacht.';
+}
 const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
 const hoverEl = document.getElementById('hover');
 const seeThrough = new Set(['pc', 'back', 'roof', 'frame', 'room']);
@@ -473,10 +499,14 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (!k) return;
   document.getElementById('infoTitle').textContent = INFO[k][0];
   document.getElementById('infoText').innerHTML = INFO[k][1];
+  infoEl.classList.remove('closed');
 });
 
+// The canvas starts below the header, whose height grows when its rows wrap
+const headerEl = document.querySelector('header');
 function resize() {
-  const w = innerWidth, h = innerHeight;
+  host.style.top = headerEl.offsetHeight + 'px';
+  const w = innerWidth, h = innerHeight - headerEl.offsetHeight;
   renderer.setSize(w, h); labelRenderer.setSize(w, h);
   camera.aspect = w / h; camera.updateProjectionMatrix();
 }
